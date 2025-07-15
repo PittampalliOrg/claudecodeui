@@ -26,11 +26,7 @@ jobs:
           fetch-depth: 0
           token: ${{ secrets.GITHUB_TOKEN }}
 
-      # 2 ─ Pre‑pull Dagger engine (avoids first‑run race) ----------------------------
-      - name: Pull Dagger engine image
-        run: docker pull registry.dagger.io/engine:v0.18.12
-
-      # 3 ─ Build & push to GHCR ------------------------------------------------------
+      # 2 ─ Build & push to GHCR ------------------------------------------------------
       - name: Build and push image with Dagger
         env:
           DAGGER_SESSION_TIMEOUT_MS: "30000"
@@ -38,13 +34,13 @@ jobs:
           GHCR_TOKEN:        ${{ secrets.GITHUB_TOKEN }}
         run: |
           cd .dagger
-          npx --yes @dagger.io/dagger@0.18.12 dagger call buildClaudeUi \
-            --src-dir .. \
+          npx --yes @dagger.io/dagger@0.18.12 dagger call build-claude-ui \
+            --src-dir=$(pwd)/.. \
             --tag ${{ github.sha }} \
             --ghcr-repo ${{ env.GHCR_REPO }} \
             --ghcr-token env:GHCR_TOKEN
 
-      # 4 ─ Summary -------------------------------------------------------------------
+      # 3 ─ Summary -------------------------------------------------------------------
       - name: Output summary
         run: |
           echo "### Claude Code UI image pushed" >> $GITHUB_STEP_SUMMARY
