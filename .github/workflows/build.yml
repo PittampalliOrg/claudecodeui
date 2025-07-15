@@ -38,7 +38,7 @@ jobs:
           GHCR_TOKEN:        ${{ secrets.GITHUB_TOKEN }}
         run: |
           cd .dagger
-          npx -y @dagger.io/dagger@0.18.12 call buildClaudeUi \
+          npx --yes @dagger.io/dagger@0.18.12 dagger call buildClaudeUi \
             --src-dir .. \
             --tag ${{ github.sha }} \
             --ghcr-repo ${{ env.GHCR_REPO }} \
