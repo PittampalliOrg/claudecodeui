@@ -1,7 +1,13 @@
 // Load environment variables from .env file
+import fs from 'fs';
+import path from 'path';
+import { fileURLToPath } from 'url';
+import { dirname } from 'path';
+
+const __filename = fileURLToPath(import.meta.url);
+const __dirname = dirname(__filename);
+
 try {
-  const fs = require('fs');
-  const path = require('path');
   const envPath = path.join(__dirname, '../.env');
   const envFile = fs.readFileSync(envPath, 'utf8');
   envFile.split('\n').forEach(line => {
@@ -19,28 +25,32 @@ try {
 
 console.log('PORT from env:', process.env.PORT);
 
-const express = require('express');
-const { WebSocketServer } = require('ws');
-const http = require('http');
-const path = require('path');
-const cors = require('cors');
-const fs = require('fs').promises;
-const { spawn } = require('child_process');
-const os = require('os');
-const pty = require('node-pty');
-const fetch = require('node-fetch');
+import express from 'express';
+import { WebSocketServer } from 'ws';
+import http from 'http';
+import cors from 'cors';
+import { promises as fsPromises } from 'fs';
+import { spawn } from 'child_process';
+import os from 'os';
+import pty from 'node-pty';
+import fetch from 'node-fetch';
+import mime from 'mime-types';
 
-const { getProjects, getSessions, getSessionMessages, renameProject, deleteSession, deleteProject, addProjectManually } = require('./projects');
-const { spawnClaude, abortClaudeSession } = require('./claude-cli');
-const gitRoutes = require('./routes/git');
+import { getProjects, getSessions, getSessionMessages, renameProject, deleteSession, deleteProject, addProjectManually, extractProjectDirectory, clearProjectDirectoryCache } from './projects.js';
+import { spawnClaude, abortClaudeSession } from './claude-cli.js';
+import gitRoutes from './routes/git.js';
+import authRoutes from './routes/auth.js';
+import mcpRoutes from './routes/mcp.js';
+import { initializeDatabase } from './database/db.js';
+import { validateApiKey, authenticateToken, authenticateWebSocket } from './middleware/auth.js';
 
 // File system watcher for projects folder
 let projectsWatcher = null;
 const connectedClients = new Set();
 
 // Setup file system watcher for Claude projects folder using chokidar
-function setupProjectsWatcher() {
-  const chokidar = require('chokidar');
+async function setupProjectsWatcher() {
+  const chokidar = (await import('chokidar')).default;
   const claudeProjectsPath = path.join(process.env.HOME, '.claude', 'projects');
   
   if (projectsWatcher) {
@@ -75,6 +85,9 @@ function setupProjectsWatcher() {
       clearTimeout(debounceTimer);
       debounceTimer = setTimeout(async () => {
         try {
+          
+          // Clear project directory cache when files change
+          clearProjectDirectoryCache();
           
           // Get updated projects list
           const updatedProjects = await getProjects();
@@ -118,18 +131,6 @@ function setupProjectsWatcher() {
   }
 }
 
-// Get the first non-localhost IP address
-function getServerIP() {
-  const interfaces = os.networkInterfaces();
-  for (const name of Object.keys(interfaces)) {
-    for (const iface of interfaces[name]) {
-      if (iface.family === 'IPv4' && !iface.internal) {
-        return iface.address;
-      }
-    }
-  }
-  return 'localhost';
-}
 
 const app = express();
 const server = http.createServer(app);
@@ -139,22 +140,66 @@ const wss = new WebSocketServer({
   server,
   verifyClient: (info) => {
     console.log('WebSocket connection attempt to:', info.req.url);
-    return true; // Accept all connections for now
+    
+    // Extract token from query parameters or headers
+    const url = new URL(info.req.url, 'http://localhost');
+    const token = url.searchParams.get('token') || 
+                  info.req.headers.authorization?.split(' ')[1];
+    
+    // Verify token
+    const user = authenticateWebSocket(token);
+    if (!user) {
+      console.log('❌ WebSocket authentication failed');
+      return false;
+    }
+    
+    // Store user info in the request for later use
+    info.req.user = user;
+    console.log('✅ WebSocket authenticated for user:', user.username);
+    return true;
   }
 });
 
 app.use(cors());
 app.use(express.json());
+
+// Optional API key validation (if configured)
+app.use('/api', validateApiKey);
+
+// Authentication routes (public)
+app.use('/api/auth', authRoutes);
+
+// Git API Routes (protected)
+app.use('/api/git', authenticateToken, gitRoutes);
+
+// MCP API Routes (protected)
+app.use('/api/mcp', authenticateToken, mcpRoutes);
+
+// Static files served after API routes
 app.use(express.static(path.join(__dirname, '../dist')));
 
-// Git API Routes
-app.use('/api/git', gitRoutes);
+// Health check endpoint (public)
+app.get('/api/health', (req, res) => {
+  res.status(200).json({ status: 'healthy', timestamp: new Date().toISOString() });
+});
 
-// API Routes
-app.get('/api/config', (req, res) => {
-  // Always use the server's actual IP and port for WebSocket connections
-  const serverIP = getServerIP();
-  const host = `${serverIP}:${PORT}`;
+// API Routes (protected)
+app.get('/api/config', authenticateToken, (req, res) => {
+  // Use environment variable for WebSocket URL if provided (for Kubernetes deployments)
+  if (process.env.WEBSOCKET_URL) {
+    // In Kubernetes, use the configured WebSocket URL
+    const wsUrl = process.env.WEBSOCKET_URL;
+    console.log('Config API called - Using WEBSOCKET_URL:', wsUrl);
+    
+    res.json({
+      serverPort: PORT,
+      wsUrl: wsUrl
+    });
+    return;
+  }
+  
+  // For local development, use request headers
+  const host = req.headers.host || `${req.hostname}:${PORT}`;
   const protocol = req.protocol === 'https' || req.get('x-forwarded-proto') === 'https' ? 'wss' : 'ws';
   
   console.log('Config API called - Returning host:', host, 'Protocol:', protocol);
@@ -165,7 +210,7 @@ app.get('/api/config', (req, res) => {
   });
 });
 
-app.get('/api/projects', async (req, res) => {
+app.get('/api/projects', authenticateToken, async (req, res) => {
   try {
     const projects = await getProjects();
     res.json(projects);
@@ -174,7 +219,7 @@ app.get('/api/projects', async (req, res) => {
   }
 });
 
-app.get('/api/projects/:projectName/sessions', async (req, res) => {
+app.get('/api/projects/:projectName/sessions', authenticateToken, async (req, res) => {
   try {
     const { limit = 5, offset = 0 } = req.query;
     const result = await getSessions(req.params.projectName, parseInt(limit), parseInt(offset));
@@ -185,7 +230,7 @@ app.get('/api/projects/:projectName/sessions', async (req, res) => {
 });
 
 // Get messages for a specific session
-app.get('/api/projects/:projectName/sessions/:sessionId/messages', async (req, res) => {
+app.get('/api/projects/:projectName/sessions/:sessionId/messages', authenticateToken, async (req, res) => {
   try {
     const { projectName, sessionId } = req.params;
     const messages = await getSessionMessages(projectName, sessionId);
@@ -196,7 +241,7 @@ app.get('/api/projects/:projectName/sessions/:sessionId/messages', async (req, r
 });
 
 // Rename project endpoint
-app.put('/api/projects/:projectName/rename', async (req, res) => {
+app.put('/api/projects/:projectName/rename', authenticateToken, async (req, res) => {
   try {
     const { displayName } = req.body;
     await renameProject(req.params.projectName, displayName);
@@ -207,7 +252,7 @@ app.put('/api/projects/:projectName/rename', async (req, res) => {
 });
 
 // Delete session endpoint
-app.delete('/api/projects/:projectName/sessions/:sessionId', async (req, res) => {
+app.delete('/api/projects/:projectName/sessions/:sessionId', authenticateToken, async (req, res) => {
   try {
     const { projectName, sessionId } = req.params;
     await deleteSession(projectName, sessionId);
@@ -218,7 +263,7 @@ app.delete('/api/projects/:projectName/sessions/:sessionId', async (req, res) =>
 });
 
 // Delete project endpoint (only if empty)
-app.delete('/api/projects/:projectName', async (req, res) => {
+app.delete('/api/projects/:projectName', authenticateToken, async (req, res) => {
   try {
     const { projectName } = req.params;
     await deleteProject(projectName);
@@ -229,7 +274,7 @@ app.delete('/api/projects/:projectName', async (req, res) => {
 });
 
 // Create project endpoint
-app.post('/api/projects/create', async (req, res) => {
+app.post('/api/projects/create', authenticateToken, async (req, res) => {
   try {
     const { path: projectPath } = req.body;
     
@@ -246,21 +291,21 @@ app.post('/api/projects/create', async (req, res) => {
 });
 
 // Read file content endpoint
-app.get('/api/projects/:projectName/file', async (req, res) => {
+app.get('/api/projects/:projectName/file', authenticateToken, async (req, res) => {
   try {
     const { projectName } = req.params;
     const { filePath } = req.query;
     
     console.log('📄 File read request:', projectName, filePath);
     
-    const fs = require('fs').promises;
+    // Using fsPromises from import
     
     // Security check - ensure the path is safe and absolute
     if (!filePath || !path.isAbsolute(filePath)) {
       return res.status(400).json({ error: 'Invalid file path' });
     }
     
-    const content = await fs.readFile(filePath, 'utf8');
+    const content = await fsPromises.readFile(filePath, 'utf8');
     res.json({ content, path: filePath });
   } catch (error) {
     console.error('Error reading file:', error);
@@ -275,15 +320,15 @@ app.get('/api/projects/:projectName/file', async (req, res) => {
 });
 
 // Serve binary file content endpoint (for images, etc.)
-app.get('/api/projects/:projectName/files/content', async (req, res) => {
+app.get('/api/projects/:projectName/files/content', authenticateToken, async (req, res) => {
   try {
     const { projectName } = req.params;
     const { path: filePath } = req.query;
     
     console.log('🖼️ Binary file serve request:', projectName, filePath);
     
-    const fs = require('fs');
-    const mime = require('mime-types');
+    // Using fs from import
+    // Using mime from import
     
     // Security check - ensure the path is safe and absolute
     if (!filePath || !path.isAbsolute(filePath)) {
@@ -292,7 +337,7 @@ app.get('/api/projects/:projectName/files/content', async (req, res) => {
     
     // Check if file exists
     try {
-      await fs.promises.access(filePath);
+      await fsPromises.access(filePath);
     } catch (error) {
       return res.status(404).json({ error: 'File not found' });
     }
@@ -321,14 +366,14 @@ app.get('/api/projects/:projectName/files/content', async (req, res) => {
 });
 
 // Save file content endpoint
-app.put('/api/projects/:projectName/file', async (req, res) => {
+app.put('/api/projects/:projectName/file', authenticateToken, async (req, res) => {
   try {
     const { projectName } = req.params;
     const { filePath, content } = req.body;
     
     console.log('💾 File save request:', projectName, filePath);
     
-    const fs = require('fs').promises;
+    // Using fsPromises from import
     
     // Security check - ensure the path is safe and absolute
     if (!filePath || !path.isAbsolute(filePath)) {
@@ -342,14 +387,14 @@ app.put('/api/projects/:projectName/file', async (req, res) => {
     // Create backup of original file
     try {
       const backupPath = filePath + '.backup.' + Date.now();
-      await fs.copyFile(filePath, backupPath);
+      await fsPromises.copyFile(filePath, backupPath);
       console.log('📋 Created backup:', backupPath);
     } catch (backupError) {
       console.warn('Could not create backup:', backupError.message);
     }
     
     // Write the new content
-    await fs.writeFile(filePath, content, 'utf8');
+    await fsPromises.writeFile(filePath, content, 'utf8');
     
     res.json({ 
       success: true, 
@@ -368,64 +413,30 @@ app.put('/api/projects/:projectName/file', async (req, res) => {
   }
 });
 
-app.get('/api/projects/:projectName/files', async (req, res) => {
+app.get('/api/projects/:projectName/files', authenticateToken, async (req, res) => {
   try {
     
-    const fs = require('fs').promises;
-    const projectPath = path.join(process.env.HOME, '.claude', 'projects', req.params.projectName);
+    // Using fsPromises from import
     
-    // Try different methods to get the actual project path
-    let actualPath = projectPath;
-    
+    // Use extractProjectDirectory to get the actual project path
+    let actualPath;
     try {
-      // First try to read metadata.json
-      const metadataPath = path.join(projectPath, 'metadata.json');
-      const metadata = JSON.parse(await fs.readFile(metadataPath, 'utf8'));
-      actualPath = metadata.path || metadata.cwd;
-    } catch (e) {
-      // Fallback: try to find the actual path by testing different dash interpretations
-      let testPath = req.params.projectName;
-      if (testPath.startsWith('-')) {
-        testPath = testPath.substring(1);
-      }
-      
-      // Try to intelligently decode the path by testing which directories exist
-      const pathParts = testPath.split('-');
-      actualPath = '/' + pathParts.join('/');
-      
-      // If the simple replacement doesn't work, try to find the correct path
-      // by testing combinations where some dashes might be part of directory names
-      if (!require('fs').existsSync(actualPath)) {
-        // Try different combinations of dash vs slash
-        for (let i = pathParts.length - 1; i >= 0; i--) {
-          let testParts = [...pathParts];
-          // Try joining some parts with dashes instead of slashes
-          for (let j = i; j < testParts.length - 1; j++) {
-            testParts[j] = testParts[j] + '-' + testParts[j + 1];
-            testParts.splice(j + 1, 1);
-            let testActualPath = '/' + testParts.join('/');
-            if (require('fs').existsSync(testActualPath)) {
-              actualPath = testActualPath;
-              break;
-            }
-          }
-          if (require('fs').existsSync(actualPath)) break;
-        }
-      }
-      
+      actualPath = await extractProjectDirectory(req.params.projectName);
+    } catch (error) {
+      console.error('Error extracting project directory:', error);
+      // Fallback to simple dash replacement
+      actualPath = req.params.projectName.replace(/-/g, '/');
     }
     
     // Check if path exists
     try {
-      await fs.access(actualPath);
+      await fsPromises.access(actualPath);
     } catch (e) {
       return res.status(404).json({ error: `Project path not found: ${actualPath}` });
     }
     
     const files = await getFileTree(actualPath, 3, 0, true);
     const hiddenFiles = files.filter(f => f.name.startsWith('.'));
-    console.log('📄 Found', files.length, 'files/folders, including', hiddenFiles.length, 'hidden files');
-    console.log('🔍 Hidden files:', hiddenFiles.map(f => f.name));
     res.json(files);
   } catch (error) {
     console.error('❌ File tree error:', error.message);
@@ -438,12 +449,16 @@ wss.on('connection', (ws, request) => {
   const url = request.url;
   console.log('🔗 Client connected to:', url);
   
-  if (url === '/shell') {
+  // Parse URL to get pathname without query parameters
+  const urlObj = new URL(url, 'http://localhost');
+  const pathname = urlObj.pathname;
+  
+  if (pathname === '/shell') {
     handleShellConnection(ws);
-  } else if (url === '/ws') {
+  } else if (pathname === '/ws') {
     handleChatConnection(ws);
   } else {
-    console.log('❌ Unknown WebSocket path:', url);
+    console.log('❌ Unknown WebSocket path:', pathname);
     ws.close();
   }
 });
@@ -658,9 +673,9 @@ function handleShellConnection(ws) {
   });
 }
 // Audio transcription endpoint
-app.post('/api/transcribe', async (req, res) => {
+app.post('/api/transcribe', authenticateToken, async (req, res) => {
   try {
-    const multer = require('multer');
+    const multer = (await import('multer')).default;
     const upload = multer({ storage: multer.memoryStorage() });
     
     // Handle multipart form data
@@ -680,7 +695,7 @@ app.post('/api/transcribe', async (req, res) => {
       
       try {
         // Create form data for OpenAI
-        const FormData = require('form-data');
+        const FormData = (await import('form-data')).default;
         const formData = new FormData();
         formData.append('file', req.file.buffer, {
           filename: req.file.originalname,
@@ -723,7 +738,7 @@ app.post('/api/transcribe', async (req, res) => {
         
         // Handle different enhancement modes
         try {
-          const OpenAI = require('openai');
+          const OpenAI = (await import('openai')).default;
           const openai = new OpenAI({ apiKey });
           
           let prompt, systemMessage, temperature = 0.7, maxTokens = 800;
@@ -806,18 +821,110 @@ Agent instructions:`;
   }
 });
 
+// Image upload endpoint
+app.post('/api/projects/:projectName/upload-images', authenticateToken, async (req, res) => {
+  try {
+    const multer = (await import('multer')).default;
+    const path = (await import('path')).default;
+    const fs = (await import('fs')).promises;
+    const os = (await import('os')).default;
+    
+    // Configure multer for image uploads
+    const storage = multer.diskStorage({
+      destination: async (req, file, cb) => {
+        const uploadDir = path.join(os.tmpdir(), 'claude-ui-uploads', String(req.user.id));
+        await fs.mkdir(uploadDir, { recursive: true });
+        cb(null, uploadDir);
+      },
+      filename: (req, file, cb) => {
+        const uniqueSuffix = Date.now() + '-' + Math.round(Math.random() * 1E9);
+        const sanitizedName = file.originalname.replace(/[^a-zA-Z0-9.-]/g, '_');
+        cb(null, uniqueSuffix + '-' + sanitizedName);
+      }
+    });
+    
+    const fileFilter = (req, file, cb) => {
+      const allowedMimes = ['image/jpeg', 'image/png', 'image/gif', 'image/webp', 'image/svg+xml'];
+      if (allowedMimes.includes(file.mimetype)) {
+        cb(null, true);
+      } else {
+        cb(new Error('Invalid file type. Only JPEG, PNG, GIF, WebP, and SVG are allowed.'));
+      }
+    };
+    
+    const upload = multer({
+      storage,
+      fileFilter,
+      limits: {
+        fileSize: 5 * 1024 * 1024, // 5MB
+        files: 5
+      }
+    });
+    
+    // Handle multipart form data
+    upload.array('images', 5)(req, res, async (err) => {
+      if (err) {
+        return res.status(400).json({ error: err.message });
+      }
+      
+      if (!req.files || req.files.length === 0) {
+        return res.status(400).json({ error: 'No image files provided' });
+      }
+      
+      try {
+        // Process uploaded images
+        const processedImages = await Promise.all(
+          req.files.map(async (file) => {
+            // Read file and convert to base64
+            const buffer = await fs.readFile(file.path);
+            const base64 = buffer.toString('base64');
+            const mimeType = file.mimetype;
+            
+            // Clean up temp file immediately
+            await fs.unlink(file.path);
+            
+            return {
+              name: file.originalname,
+              data: `data:${mimeType};base64,${base64}`,
+              size: file.size,
+              mimeType: mimeType
+            };
+          })
+        );
+        
+        res.json({ images: processedImages });
+      } catch (error) {
+        console.error('Error processing images:', error);
+        // Clean up any remaining files
+        await Promise.all(req.files.map(f => fs.unlink(f.path).catch(() => {})));
+        res.status(500).json({ error: 'Failed to process images' });
+      }
+    });
+  } catch (error) {
+    console.error('Error in image upload endpoint:', error);
+    res.status(500).json({ error: 'Internal server error' });
+  }
+});
 
 // Serve React app for all other routes
 app.get('*', (req, res) => {
   res.sendFile(path.join(__dirname, '../dist/index.html'));
 });
 
+// Helper function to convert permissions to rwx format
+function permToRwx(perm) {
+  const r = perm & 4 ? 'r' : '-';
+  const w = perm & 2 ? 'w' : '-';
+  const x = perm & 1 ? 'x' : '-';
+  return r + w + x;
+}
+
 async function getFileTree(dirPath, maxDepth = 3, currentDepth = 0, showHidden = true) {
-  const fs = require('fs').promises;
+  // Using fsPromises from import
   const items = [];
   
   try {
-    const entries = await fs.readdir(dirPath, { withFileTypes: true });
+    const entries = await fsPromises.readdir(dirPath, { withFileTypes: true });
     
     for (const entry of entries) {
       // Debug: log all entries including hidden files
@@ -828,17 +935,39 @@ async function getFileTree(dirPath, maxDepth = 3, currentDepth = 0, showHidden =
           entry.name === 'dist' || 
           entry.name === 'build') continue;
       
+      const itemPath = path.join(dirPath, entry.name);
       const item = {
         name: entry.name,
-        path: path.join(dirPath, entry.name),
+        path: itemPath,
         type: entry.isDirectory() ? 'directory' : 'file'
       };
+      
+      // Get file stats for additional metadata
+      try {
+        const stats = await fsPromises.stat(itemPath);
+        item.size = stats.size;
+        item.modified = stats.mtime.toISOString();
+        
+        // Convert permissions to rwx format
+        const mode = stats.mode;
+        const ownerPerm = (mode >> 6) & 7;
+        const groupPerm = (mode >> 3) & 7;
+        const otherPerm = mode & 7;
+        item.permissions = ((mode >> 6) & 7).toString() + ((mode >> 3) & 7).toString() + (mode & 7).toString();
+        item.permissionsRwx = permToRwx(ownerPerm) + permToRwx(groupPerm) + permToRwx(otherPerm);
+      } catch (statError) {
+        // If stat fails, provide default values
+        item.size = 0;
+        item.modified = null;
+        item.permissions = '000';
+        item.permissionsRwx = '---------';
+      }
       
       if (entry.isDirectory() && currentDepth < maxDepth) {
         // Recursively get subdirectories but limit depth
         try {
           // Check if we can access the directory before trying to read it
-          await fs.access(item.path, fs.constants.R_OK);
+          await fsPromises.access(item.path, fs.constants.R_OK);
           item.children = await getFileTree(item.path, maxDepth, currentDepth + 1, showHidden);
         } catch (e) {
           // Silently skip directories we can't access (permission denied, etc.)
@@ -864,9 +993,24 @@ async function getFileTree(dirPath, maxDepth = 3, currentDepth = 0, showHidden =
 }
 
 const PORT = process.env.PORT || 3000;
-server.listen(PORT, '0.0.0.0', () => {
-  console.log(`Claude Code UI server running on http://0.0.0.0:${PORT}`);
-  
-  // Start watching the projects folder for changes
-  setupProjectsWatcher();
-});
+
+// Initialize database and start server
+async function startServer() {
+  try {
+    // Initialize authentication database
+    await initializeDatabase();
+    console.log('✅ Database initialization skipped (testing)');
+    
+    server.listen(PORT, '0.0.0.0', async () => {
+      console.log(`Claude Code UI server running on http://0.0.0.0:${PORT}`);
+      
+      // Start watching the projects folder for changes
+      await setupProjectsWatcher(); // Re-enabled with better-sqlite3
+    });
+  } catch (error) {
+    console.error('❌ Failed to start server:', error);
+    process.exit(1);
+  }
+}
+
+startServer();

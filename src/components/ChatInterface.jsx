@@ -18,11 +18,13 @@
 
 import React, { useState, useEffect, useRef, useMemo, useCallback, memo } from 'react';
 import ReactMarkdown from 'react-markdown';
+import { useDropzone } from 'react-dropzone';
 import TodoList from './TodoList';
 import ClaudeLogo from './ClaudeLogo.jsx';
 
 import ClaudeStatus from './ClaudeStatus';
 import { MicButton } from './MicButton.jsx';
+import { api } from '../utils/api';
 
 // Memoized message component to prevent unnecessary re-renders
 const MessageComponent = memo(({ message, index, prevMessage, createDiff, onFileOpen, onShowSettings, autoExpandTools, showRawParameters }) => {
@@ -71,6 +73,19 @@ const MessageComponent = memo(({ message, index, prevMessage, createDiff, onFile
             <div className="text-sm whitespace-pre-wrap break-words">
               {message.content}
             </div>
+            {message.images && message.images.length > 0 && (
+              <div className="mt-2 grid grid-cols-2 gap-2">
+                {message.images.map((img, idx) => (
+                  <img
+                    key={idx}
+                    src={img.data}
+                    alt={img.name}
+                    className="rounded-lg max-w-full h-auto cursor-pointer hover:opacity-90 transition-opacity"
+                    onClick={() => window.open(img.data, '_blank')}
+                  />
+                ))}
+              </div>
+            )}
             <div className="text-xs text-blue-100 mt-1 text-right">
               {new Date(message.timestamp).toLocaleTimeString()}
             </div>
@@ -450,6 +465,32 @@ const MessageComponent = memo(({ message, index, prevMessage, createDiff, onFile
                     }
                   }
                   
+                  // Special handling for exit_plan_mode tool
+                  if (message.toolName === 'exit_plan_mode') {
+                    try {
+                      const input = JSON.parse(message.toolInput);
+                      if (input.plan) {
+                        // Replace escaped newlines with actual newlines
+                        const planContent = input.plan.replace(/\\n/g, '\n');
+                        return (
+                          <details className="mt-2" open={autoExpandTools}>
+                            <summary className="text-sm text-blue-700 dark:text-blue-300 cursor-pointer hover:text-blue-800 dark:hover:text-blue-200 flex items-center gap-2">
+                              <svg className="w-4 h-4 transition-transform details-chevron" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M19 9l-7 7-7-7" />
+                              </svg>
+                              📋 View implementation plan
+                            </summary>
+                            <div className="mt-3 prose prose-sm max-w-none dark:prose-invert">
+                              <ReactMarkdown>{planContent}</ReactMarkdown>
+                            </div>
+                          </details>
+                        );
+                      }
+                    } catch (e) {
+                      // Fall back to regular display
+                    }
+                  }
+                  
                   // Regular tool input display for other tools
                   return (
                     <details className="mt-2" open={autoExpandTools}>
@@ -528,6 +569,30 @@ const MessageComponent = memo(({ message, index, prevMessage, createDiff, onFile
                                     <span className="font-medium">Current Todo List</span>
                                   </div>
                                   <TodoList todos={todos} isResult={true} />
+                                </div>
+                              );
+                            }
+                          } catch (e) {
+                            // Fall through to regular handling
+                          }
+                        }
+
+                        // Special handling for exit_plan_mode tool results
+                        if (message.toolName === 'exit_plan_mode') {
+                          try {
+                            // The content should be JSON with a "plan" field
+                            const parsed = JSON.parse(content);
+                            if (parsed.plan) {
+                              // Replace escaped newlines with actual newlines
+                              const planContent = parsed.plan.replace(/\\n/g, '\n');
+                              return (
+                                <div>
+                                  <div className="flex items-center gap-2 mb-3">
+                                    <span className="font-medium">Implementation Plan</span>
+                                  </div>
+                                  <div className="prose prose-sm max-w-none dark:prose-invert">
+                                    <ReactMarkdown>{planContent}</ReactMarkdown>
+                                  </div>
                                 </div>
                               );
                             }
@@ -874,6 +939,43 @@ const MessageComponent = memo(({ message, index, prevMessage, createDiff, onFile
   );
 });
 
+// ImageAttachment component for displaying image previews
+const ImageAttachment = ({ file, onRemove, uploadProgress, error }) => {
+  const [preview, setPreview] = useState(null);
+  
+  useEffect(() => {
+    const url = URL.createObjectURL(file);
+    setPreview(url);
+    return () => URL.revokeObjectURL(url);
+  }, [file]);
+  
+  return (
+    <div className="relative group">
+      <img src={preview} alt={file.name} className="w-20 h-20 object-cover rounded" />
+      {uploadProgress !== undefined && uploadProgress < 100 && (
+        <div className="absolute inset-0 bg-black/50 flex items-center justify-center">
+          <div className="text-white text-xs">{uploadProgress}%</div>
+        </div>
+      )}
+      {error && (
+        <div className="absolute inset-0 bg-red-500/50 flex items-center justify-center">
+          <svg className="w-6 h-6 text-white" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+            <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M6 18L18 6M6 6l12 12" />
+          </svg>
+        </div>
+      )}
+      <button
+        onClick={onRemove}
+        className="absolute -top-2 -right-2 bg-red-500 text-white rounded-full p-1 opacity-0 group-hover:opacity-100"
+      >
+        <svg className="w-3 h-3" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+          <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M6 18L18 6M6 6l12 12" />
+        </svg>
+      </button>
+    </div>
+  );
+};
+
 // ChatInterface: Main chat component with Session Protection System integration
 // 
 // Session Protection System prevents automatic project updates from interrupting active conversations:
@@ -902,6 +1004,10 @@ function ChatInterface({ selectedProject, selectedSession, ws, sendMessage, mess
   const [sessionMessages, setSessionMessages] = useState([]);
   const [isLoadingSessionMessages, setIsLoadingSessionMessages] = useState(false);
   const [isSystemSessionChange, setIsSystemSessionChange] = useState(false);
+  const [permissionMode, setPermissionMode] = useState('default');
+  const [attachedImages, setAttachedImages] = useState([]);
+  const [uploadingImages, setUploadingImages] = useState(new Map());
+  const [imageErrors, setImageErrors] = useState(new Map());
   const messagesEndRef = useRef(null);
   const textareaRef = useRef(null);
   const scrollContainerRef = useRef(null);
@@ -921,6 +1027,7 @@ function ChatInterface({ selectedProject, selectedSession, ws, sendMessage, mess
   const [isTextareaExpanded, setIsTextareaExpanded] = useState(false);
   const [selectedCommandIndex, setSelectedCommandIndex] = useState(-1);
   const [slashPosition, setSlashPosition] = useState(-1);
+  const [visibleMessageCount, setVisibleMessageCount] = useState(100);
   const [claudeStatus, setClaudeStatus] = useState(null);
 
 
@@ -949,7 +1056,7 @@ function ChatInterface({ selectedProject, selectedSession, ws, sendMessage, mess
     
     setIsLoadingSessionMessages(true);
     try {
-      const response = await fetch(`/api/projects/${projectName}/sessions/${sessionId}/messages`);
+      const response = await api.sessionMessages(projectName, sessionId);
       if (!response.ok) {
         throw new Error('Failed to load session messages');
       }
@@ -1378,6 +1485,11 @@ function ChatInterface({ selectedProject, selectedSession, ws, sendMessage, mess
                 setCurrentSessionId(pendingSessionId);
             sessionStorage.removeItem('pendingSessionId');
           }
+          
+          // Clear persisted chat messages after successful completion
+          if (selectedProject && latestMessage.exitCode === 0) {
+            localStorage.removeItem(`chat_messages_${selectedProject.name}`);
+          }
           break;
           
         case 'session-aborted':
@@ -1451,7 +1563,7 @@ function ChatInterface({ selectedProject, selectedSession, ws, sendMessage, mess
 
   const fetchProjectFiles = async () => {
     try {
-      const response = await fetch(`/api/projects/${selectedProject.name}/files`);
+      const response = await api.getFiles(selectedProject.name);
       if (response.ok) {
         const files = await response.json();
         // Flatten the file tree to get all file paths
@@ -1519,14 +1631,13 @@ function ChatInterface({ selectedProject, selectedSession, ws, sendMessage, mess
     return () => clearTimeout(timer);
   }, [input]);
 
-  // Show only recent messages for better performance (last 100 messages)
+  // Show only recent messages for better performance
   const visibleMessages = useMemo(() => {
-    const maxMessages = 100;
-    if (chatMessages.length <= maxMessages) {
+    if (chatMessages.length <= visibleMessageCount) {
       return chatMessages;
     }
-    return chatMessages.slice(-maxMessages);
-  }, [chatMessages]);
+    return chatMessages.slice(-visibleMessageCount);
+  }, [chatMessages, visibleMessageCount]);
 
   // Capture scroll position before render when auto-scroll is disabled
   useEffect(() => {
@@ -1595,6 +1706,14 @@ function ChatInterface({ selectedProject, selectedSession, ws, sendMessage, mess
     }
   }, []); // Only run once on mount
 
+  // Reset textarea height when input is cleared programmatically
+  useEffect(() => {
+    if (textareaRef.current && !input.trim()) {
+      textareaRef.current.style.height = 'auto';
+      setIsTextareaExpanded(false);
+    }
+  }, [input]);
+
   const handleTranscript = useCallback((text) => {
     if (text.trim()) {
       setInput(prevInput => {
@@ -1618,13 +1737,110 @@ function ChatInterface({ selectedProject, selectedSession, ws, sendMessage, mess
     }
   }, []);
 
-  const handleSubmit = (e) => {
+  // Load earlier messages by increasing the visible message count
+  const loadEarlierMessages = useCallback(() => {
+    setVisibleMessageCount(prevCount => prevCount + 100);
+  }, []);
+
+  // Handle image files from drag & drop or file picker
+  const handleImageFiles = useCallback((files) => {
+    const validFiles = files.filter(file => {
+      if (!file.type.startsWith('image/')) {
+        return false;
+      }
+      if (file.size > 5 * 1024 * 1024) {
+        setImageErrors(prev => new Map(prev).set(file.name, 'File too large (max 5MB)'));
+        return false;
+      }
+      return true;
+    });
+
+    if (validFiles.length > 0) {
+      setAttachedImages(prev => [...prev, ...validFiles].slice(0, 5)); // Max 5 images
+    }
+  }, []);
+
+  // Handle clipboard paste for images
+  const handlePaste = useCallback(async (e) => {
+    const items = Array.from(e.clipboardData.items);
+    
+    for (const item of items) {
+      if (item.type.startsWith('image/')) {
+        const file = item.getAsFile();
+        if (file) {
+          handleImageFiles([file]);
+        }
+      }
+    }
+    
+    // Fallback for some browsers/platforms
+    if (items.length === 0 && e.clipboardData.files.length > 0) {
+      const files = Array.from(e.clipboardData.files);
+      const imageFiles = files.filter(f => f.type.startsWith('image/'));
+      if (imageFiles.length > 0) {
+        handleImageFiles(imageFiles);
+      }
+    }
+  }, [handleImageFiles]);
+
+  // Setup dropzone
+  const { getRootProps, getInputProps, isDragActive, open } = useDropzone({
+    accept: {
+      'image/*': ['.png', '.jpg', '.jpeg', '.gif', '.webp', '.svg']
+    },
+    maxSize: 5 * 1024 * 1024, // 5MB
+    maxFiles: 5,
+    onDrop: handleImageFiles,
+    noClick: true, // We'll use our own button
+    noKeyboard: true
+  });
+
+  const handleSubmit = async (e) => {
     e.preventDefault();
     if (!input.trim() || isLoading || !selectedProject) return;
+
+    // Upload images first if any
+    let uploadedImages = [];
+    if (attachedImages.length > 0) {
+      const formData = new FormData();
+      attachedImages.forEach(file => {
+        formData.append('images', file);
+      });
+      
+      try {
+        const token = localStorage.getItem('auth-token');
+        const headers = {};
+        if (token) {
+          headers['Authorization'] = `Bearer ${token}`;
+        }
+        
+        const response = await fetch(`/api/projects/${selectedProject.name}/upload-images`, {
+          method: 'POST',
+          headers: headers,
+          body: formData
+        });
+        
+        if (!response.ok) {
+          throw new Error('Failed to upload images');
+        }
+        
+        const result = await response.json();
+        uploadedImages = result.images;
+      } catch (error) {
+        console.error('Image upload failed:', error);
+        setChatMessages(prev => [...prev, {
+          type: 'error',
+          content: `Failed to upload images: ${error.message}`,
+          timestamp: new Date()
+        }]);
+        return;
+      }
+    }
 
     const userMessage = {
       type: 'user',
       content: input,
+      images: uploadedImages,
       timestamp: new Date()
     };
 
@@ -1671,7 +1887,7 @@ function ChatInterface({ selectedProject, selectedSession, ws, sendMessage, mess
 
     const toolsSettings = getToolsSettings();
 
-    // Send command to Claude CLI via WebSocket
+    // Send command to Claude CLI via WebSocket with images
     sendMessage({
       type: 'claude-command',
       command: input,
@@ -1680,12 +1896,25 @@ function ChatInterface({ selectedProject, selectedSession, ws, sendMessage, mess
         cwd: selectedProject.fullPath,
         sessionId: currentSessionId,
         resume: !!currentSessionId,
-        toolsSettings: toolsSettings
+        toolsSettings: toolsSettings,
+        permissionMode: permissionMode,
+        images: uploadedImages // Pass images to backend
       }
     });
 
     setInput('');
+    setAttachedImages([]);
+    setUploadingImages(new Map());
+    setImageErrors(new Map());
     setIsTextareaExpanded(false);
+    
+    // Reset textarea height
+
+
+    if (textareaRef.current) {
+      textareaRef.current.style.height = 'auto';
+    }
+    
     // Clear the saved draft since message was sent
     if (selectedProject) {
       localStorage.removeItem(`draft_input_${selectedProject.name}`);
@@ -1725,6 +1954,16 @@ function ChatInterface({ selectedProject, selectedSession, ws, sendMessage, mess
       }
     }
     
+    // Handle Tab key for mode switching (only when file dropdown is not showing)
+    if (e.key === 'Tab' && !showFileDropdown) {
+      e.preventDefault();
+      const modes = ['default', 'acceptEdits', 'bypassPermissions', 'plan'];
+      const currentIndex = modes.indexOf(permissionMode);
+      const nextIndex = (currentIndex + 1) % modes.length;
+      setPermissionMode(modes[nextIndex]);
+      return;
+    }
+    
     // Handle Enter key: Ctrl+Enter (Cmd+Enter on Mac) sends, Shift+Enter creates new line
     if (e.key === 'Enter') {
       if ((e.ctrlKey || e.metaKey) && !e.shiftKey) {
@@ -1746,25 +1985,47 @@ function ChatInterface({ selectedProject, selectedSession, ws, sendMessage, mess
     const spaceIndex = textAfterAtQuery.indexOf(' ');
     const textAfterQuery = spaceIndex !== -1 ? textAfterAtQuery.slice(spaceIndex) : '';
     
-    const newInput = textBeforeAt + '@' + file.path + textAfterQuery;
+    const newInput = textBeforeAt + '@' + file.path + ' ' + textAfterQuery;
+    const newCursorPos = textBeforeAt.length + 1 + file.path.length + 1;
+    
+    // Immediately ensure focus is maintained
+    if (textareaRef.current && !textareaRef.current.matches(':focus')) {
+      textareaRef.current.focus();
+    }
+    
+    // Update input and cursor position
     setInput(newInput);
+    setCursorPosition(newCursorPos);
+    
+    // Hide dropdown
     setShowFileDropdown(false);
     setAtSymbolPosition(-1);
     
-    // Focus back to textarea and set cursor position
+    // Set cursor position synchronously 
     if (textareaRef.current) {
-      textareaRef.current.focus();
-      const newCursorPos = textBeforeAt.length + 1 + file.path.length;
-      setTimeout(() => {
-        textareaRef.current.setSelectionRange(newCursorPos, newCursorPos);
-        setCursorPosition(newCursorPos);
-      }, 0);
+      // Use requestAnimationFrame for smoother updates
+      requestAnimationFrame(() => {
+        if (textareaRef.current) {
+          textareaRef.current.setSelectionRange(newCursorPos, newCursorPos);
+          // Ensure focus is maintained
+          if (!textareaRef.current.matches(':focus')) {
+            textareaRef.current.focus();
+          }
+        }
+      });
     }
   };
 
   const handleInputChange = (e) => {
-    setInput(e.target.value);
+    const newValue = e.target.value;
+    setInput(newValue);
     setCursorPosition(e.target.selectionStart);
+    
+    // Handle height reset when input becomes empty
+    if (!newValue.trim()) {
+      e.target.style.height = 'auto';
+      setIsTextareaExpanded(false);
+    }
   };
 
   const handleTextareaClick = (e) => {
@@ -1787,6 +2048,13 @@ function ChatInterface({ selectedProject, selectedSession, ws, sendMessage, mess
         sessionId: currentSessionId
       });
     }
+  };
+
+  const handleModeSwitch = () => {
+    const modes = ['default', 'acceptEdits', 'bypassPermissions', 'plan'];
+    const currentIndex = modes.indexOf(permissionMode);
+    const nextIndex = (currentIndex + 1) % modes.length;
+    setPermissionMode(modes[nextIndex]);
   };
 
   // Don't render if no project is selected
@@ -1833,10 +2101,13 @@ function ChatInterface({ selectedProject, selectedSession, ws, sendMessage, mess
           </div>
         ) : (
           <>
-            {chatMessages.length > 100 && (
+            {chatMessages.length > visibleMessageCount && (
               <div className="text-center text-gray-500 dark:text-gray-400 text-sm py-2 border-b border-gray-200 dark:border-gray-700">
-                Showing last 100 messages ({chatMessages.length} total) • 
-                <button className="ml-1 text-blue-600 hover:text-blue-700 underline">
+                Showing last {visibleMessageCount} messages ({chatMessages.length} total) • 
+                <button 
+                  className="ml-1 text-blue-600 hover:text-blue-700 underline"
+                  onClick={loadEarlierMessages}
+                >
                   Load earlier messages
                 </button>
               </div>
@@ -1887,18 +2158,6 @@ function ChatInterface({ selectedProject, selectedSession, ws, sendMessage, mess
         <div ref={messagesEndRef} />
       </div>
 
-      {/* Floating scroll to bottom button - positioned outside scrollable container */}
-      {isUserScrolledUp && chatMessages.length > 0 && (
-        <button
-          onClick={scrollToBottom}
-          className="fixed bottom-20 sm:bottom-24 right-4 sm:right-6 w-12 h-12 bg-blue-600 hover:bg-blue-700 text-white rounded-full shadow-lg flex items-center justify-center transition-all duration-200 hover:scale-105 focus:outline-none focus:ring-2 focus:ring-blue-500 focus:ring-offset-2 dark:ring-offset-gray-800 z-50"
-          title="Scroll to bottom"
-        >
-          <svg className="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-            <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M19 14l-7 7m0 0l-7-7m7 7V3" />
-          </svg>
-        </button>
-      )}
 
       {/* Input Area - Fixed Bottom */}
       <div className={`p-2 sm:p-4 md:p-6 flex-shrink-0 ${
@@ -1911,14 +2170,129 @@ function ChatInterface({ selectedProject, selectedSession, ws, sendMessage, mess
           onAbort={handleAbortSession}
         />
         
+        {/* Permission Mode Selector with scroll to bottom button - Above input, clickable for mobile */}
+        <div className="max-w-4xl mx-auto mb-3">
+          <div className="flex items-center justify-center gap-3">
+            <button
+              type="button"
+              onClick={handleModeSwitch}
+              className={`px-3 py-1.5 rounded-lg text-sm font-medium border transition-all duration-200 ${
+                permissionMode === 'default' 
+                  ? 'bg-gray-100 dark:bg-gray-700 text-gray-700 dark:text-gray-300 border-gray-300 dark:border-gray-600 hover:bg-gray-200 dark:hover:bg-gray-600'
+                  : permissionMode === 'acceptEdits'
+                  ? 'bg-green-50 dark:bg-green-900/20 text-green-700 dark:text-green-300 border-green-300 dark:border-green-600 hover:bg-green-100 dark:hover:bg-green-900/30'
+                  : permissionMode === 'bypassPermissions'
+                  ? 'bg-orange-50 dark:bg-orange-900/20 text-orange-700 dark:text-orange-300 border-orange-300 dark:border-orange-600 hover:bg-orange-100 dark:hover:bg-orange-900/30'
+                  : 'bg-blue-50 dark:bg-blue-900/20 text-blue-700 dark:text-blue-300 border-blue-300 dark:border-blue-600 hover:bg-blue-100 dark:hover:bg-blue-900/30'
+              }`}
+              title="Click to change permission mode (or press Tab in input)"
+            >
+              <div className="flex items-center gap-2">
+                <div className={`w-2 h-2 rounded-full ${
+                  permissionMode === 'default' 
+                    ? 'bg-gray-500'
+                    : permissionMode === 'acceptEdits'
+                    ? 'bg-green-500'
+                    : permissionMode === 'bypassPermissions'
+                    ? 'bg-orange-500'
+                    : 'bg-blue-500'
+                }`} />
+                <span>
+                  {permissionMode === 'default' && 'Default Mode'}
+                  {permissionMode === 'acceptEdits' && 'Accept Edits'}
+                  {permissionMode === 'bypassPermissions' && 'Bypass Permissions'}
+                  {permissionMode === 'plan' && 'Plan Mode'}
+                </span>
+              </div>
+            </button>
+            
+            {/* Scroll to bottom button - positioned next to mode indicator */}
+            {isUserScrolledUp && chatMessages.length > 0 && (
+              <button
+                onClick={scrollToBottom}
+                className="w-8 h-8 bg-blue-600 hover:bg-blue-700 text-white rounded-full shadow-lg flex items-center justify-center transition-all duration-200 hover:scale-105 focus:outline-none focus:ring-2 focus:ring-blue-500 focus:ring-offset-2 dark:ring-offset-gray-800"
+                title="Scroll to bottom"
+              >
+                <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                  <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M19 14l-7 7m0 0l-7-7m7 7V3" />
+                </svg>
+              </button>
+            )}
+          </div>
+        </div>
+        
         <form onSubmit={handleSubmit} className="relative max-w-4xl mx-auto">
-          <div className={`relative bg-white dark:bg-gray-800 rounded-2xl shadow-lg border border-gray-200 dark:border-gray-600 focus-within:ring-2 focus-within:ring-blue-500 dark:focus-within:ring-blue-500 focus-within:border-blue-500 transition-all duration-200 ${isTextareaExpanded ? 'chat-input-expanded' : ''}`}>
+          {/* Drag overlay */}
+          {isDragActive && (
+            <div className="absolute inset-0 bg-blue-500/20 border-2 border-dashed border-blue-500 rounded-lg flex items-center justify-center z-50">
+              <div className="bg-white dark:bg-gray-800 rounded-lg p-4 shadow-lg">
+                <svg className="w-8 h-8 text-blue-500 mx-auto mb-2" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                  <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M7 16a4 4 0 01-.88-7.903A5 5 0 1115.9 6L16 6a5 5 0 011 9.9M15 13l-3-3m0 0l-3 3m3-3v12" />
+                </svg>
+                <p className="text-sm font-medium">Drop images here</p>
+              </div>
+            </div>
+          )}
+          
+          {/* Image attachments preview */}
+          {attachedImages.length > 0 && (
+            <div className="mb-2 p-2 bg-gray-50 dark:bg-gray-800 rounded-lg">
+              <div className="flex flex-wrap gap-2">
+                {attachedImages.map((file, index) => (
+                  <ImageAttachment
+                    key={index}
+                    file={file}
+                    onRemove={() => {
+                      setAttachedImages(prev => prev.filter((_, i) => i !== index));
+                    }}
+                    uploadProgress={uploadingImages.get(file.name)}
+                    error={imageErrors.get(file.name)}
+                  />
+                ))}
+              </div>
+            </div>
+          )}
+          
+          {/* File dropdown - positioned outside dropzone to avoid conflicts */}
+          {showFileDropdown && filteredFiles.length > 0 && (
+            <div className="absolute bottom-full left-0 right-0 mb-2 bg-white dark:bg-gray-800 border border-gray-200 dark:border-gray-600 rounded-lg shadow-lg max-h-48 overflow-y-auto z-50 backdrop-blur-sm">
+              {filteredFiles.map((file, index) => (
+                <div
+                  key={file.path}
+                  className={`px-4 py-3 cursor-pointer border-b border-gray-100 dark:border-gray-700 last:border-b-0 touch-manipulation ${
+                    index === selectedFileIndex
+                      ? 'bg-blue-50 dark:bg-blue-900/20 text-blue-700 dark:text-blue-300'
+                      : 'hover:bg-gray-50 dark:hover:bg-gray-700 text-gray-700 dark:text-gray-300'
+                  }`}
+                  onMouseDown={(e) => {
+                    // Prevent textarea from losing focus on mobile
+                    e.preventDefault();
+                    e.stopPropagation();
+                  }}
+                  onClick={(e) => {
+                    e.preventDefault();
+                    e.stopPropagation();
+                    selectFile(file);
+                  }}
+                >
+                  <div className="font-medium text-sm">{file.name}</div>
+                  <div className="text-xs text-gray-500 dark:text-gray-400 font-mono">
+                    {file.path}
+                  </div>
+                </div>
+              ))}
+            </div>
+          )}
+          
+          <div {...getRootProps()} className={`relative bg-white dark:bg-gray-800 rounded-2xl shadow-lg border border-gray-200 dark:border-gray-600 focus-within:ring-2 focus-within:ring-blue-500 dark:focus-within:ring-blue-500 focus-within:border-blue-500 transition-all duration-200 ${isTextareaExpanded ? 'chat-input-expanded' : ''}`}>
+            <input {...getInputProps()} />
             <textarea
               ref={textareaRef}
               value={input}
               onChange={handleInputChange}
               onClick={handleTextareaClick}
               onKeyDown={handleKeyDown}
+              onPaste={handlePaste}
               onFocus={() => setIsInputFocused(true)}
               onBlur={() => setIsInputFocused(false)}
               onInput={(e) => {
@@ -1935,7 +2309,7 @@ function ChatInterface({ selectedProject, selectedSession, ws, sendMessage, mess
               placeholder="Ask Claude to help with your code... (@ to reference files)"
               disabled={isLoading}
               rows={1}
-              className="chat-input-placeholder w-full px-4 sm:px-6 py-3 sm:py-4 pr-28 sm:pr-40 bg-transparent rounded-2xl focus:outline-none text-gray-900 dark:text-gray-100 placeholder-gray-400 dark:placeholder-gray-500 disabled:opacity-50 resize-none min-h-[40px] sm:min-h-[56px] max-h-[40vh] sm:max-h-[300px] overflow-y-auto text-sm sm:text-base transition-all duration-200"
+              className="chat-input-placeholder w-full pl-12 pr-28 sm:pr-40 py-3 sm:py-4 bg-transparent rounded-2xl focus:outline-none text-gray-900 dark:text-gray-100 placeholder-gray-400 dark:placeholder-gray-500 disabled:opacity-50 resize-none min-h-[40px] sm:min-h-[56px] max-h-[40vh] sm:max-h-[300px] overflow-y-auto text-sm sm:text-base transition-all duration-200"
               style={{ height: 'auto' }}
             />
             {/* Clear button - shown when there's text */}
@@ -1980,6 +2354,18 @@ function ChatInterface({ selectedProject, selectedSession, ws, sendMessage, mess
                 </svg>
               </button>
             )}
+            {/* Image upload button */}
+            <button
+              type="button"
+              onClick={open}
+              className="absolute left-2 bottom-4 p-2 hover:bg-gray-100 dark:hover:bg-gray-700 rounded-lg transition-colors"
+              title="Attach images"
+            >
+              <svg className="w-5 h-5 text-gray-500" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M4 16l4.586-4.586a2 2 0 012.828 0L16 16m-2-2l1.586-1.586a2 2 0 012.828 0L20 14m-6-6h.01M6 20h12a2 2 0 002-2V6a2 2 0 00-2-2H6a2 2 0 00-2 2v12a2 2 0 002 2z" />
+              </svg>
+            </button>
+            
             {/* Mic button - HIDDEN */}
             <div className="absolute right-16 sm:right-16 top-1/2 transform -translate-y-1/2" style={{ display: 'none' }}>
               <MicButton 
@@ -2015,37 +2401,15 @@ function ChatInterface({ selectedProject, selectedSession, ws, sendMessage, mess
                 />
               </svg>
             </button>
-            
-            {/* File dropdown */}
-            {showFileDropdown && filteredFiles.length > 0 && (
-              <div className="absolute bottom-full left-0 right-0 mb-2 bg-white dark:bg-gray-800 border border-gray-200 dark:border-gray-600 rounded-lg shadow-lg max-h-48 overflow-y-auto z-50">
-                {filteredFiles.map((file, index) => (
-                  <div
-                    key={file.path}
-                    className={`px-4 py-2 cursor-pointer border-b border-gray-100 dark:border-gray-700 last:border-b-0 ${
-                      index === selectedFileIndex
-                        ? 'bg-blue-50 dark:bg-blue-900/20 text-blue-700 dark:text-blue-300'
-                        : 'hover:bg-gray-50 dark:hover:bg-gray-700 text-gray-700 dark:text-gray-300'
-                    }`}
-                    onClick={() => selectFile(file)}
-                  >
-                    <div className="font-medium text-sm">{file.name}</div>
-                    <div className="text-xs text-gray-500 dark:text-gray-400 font-mono">
-                      {file.path}
-                    </div>
-                  </div>
-                ))}
-              </div>
-            )}
           </div>
           {/* Hint text */}
           <div className="text-xs text-gray-500 dark:text-gray-400 text-center mt-2 hidden sm:block">
-            Press Enter to send • Shift+Enter for new line • @ to reference files
+            Press Enter to send • Shift+Enter for new line • Tab to change modes • @ to reference files
           </div>
           <div className={`text-xs text-gray-500 dark:text-gray-400 text-center mt-2 sm:hidden transition-opacity duration-200 ${
             isInputFocused ? 'opacity-100' : 'opacity-0'
           }`}>
-            Enter to send • @ for files
+            Enter to send • Tab for modes • @ for files
           </div>
         </form>
       </div>

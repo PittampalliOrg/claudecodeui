@@ -1,0 +1,51 @@
+name: Build & Push Claude Code UI
+
+on:
+  push:
+    branches: [main, basics, local]
+  pull_request:
+    branches: [main, basics, local]
+  workflow_dispatch:
+
+env:
+  IMAGE_NAME: claude-code-ui
+  GHCR_REPO: ghcr.io/${{ github.repository }}
+
+jobs:
+  build:
+    runs-on: depot-ubuntu-24.04,dagger=0.18.12
+    permissions:
+      contents: write
+      packages: write
+
+    steps:
+      # 1 ─ Checkout -----------------------------------------------------------------
+      - name: Checkout code
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          token: ${{ secrets.GITHUB_TOKEN }}
+
+      # 2 ─ Pre‑pull Dagger engine (avoids first‑run race) ----------------------------
+      - name: Pull Dagger engine image
+        run: docker pull registry.dagger.io/engine:v0.18.12
+
+      # 3 ─ Build & push to GHCR ------------------------------------------------------
+      - name: Build and push image with Dagger
+        env:
+          DAGGER_SESSION_TIMEOUT_MS: "30000"
+          DAGGER_CLOUD_TOKEN: ${{ secrets.DAGGER_CLOUD_TOKEN }}
+          GHCR_TOKEN:        ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          cd .dagger
+          npx -y @dagger.io/dagger@0.18.12 call buildClaudeUi \
+            --src-dir .. \
+            --tag ${{ github.sha }} \
+            --ghcr-repo ${{ env.GHCR_REPO }} \
+            --ghcr-token env:GHCR_TOKEN
+
+      # 4 ─ Summary -------------------------------------------------------------------
+      - name: Output summary
+        run: |
+          echo "### Claude Code UI image pushed" >> $GITHUB_STEP_SUMMARY
+          echo "- GHCR : ${{ env.GHCR_REPO }}:${{ github.sha }}" >> $GITHUB_STEP_SUMMARY

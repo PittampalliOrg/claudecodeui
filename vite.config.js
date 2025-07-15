@@ -16,6 +16,9 @@ export default defineConfig(({ command, mode }) => {
           target: `ws://localhost:${env.PORT || 3002}`,
           ws: true
         }
+      },
+      watch: {
+        ignored: ['**/.devbox/**', '**/node_modules/**', '**/.git/**']
       }
     },
     build: {

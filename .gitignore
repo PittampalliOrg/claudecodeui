@@ -90,6 +90,7 @@ jspm_packages/
 # Temporary folders
 tmp/
 temp/
+.tmp/
 
 # Vite
 .vite/
@@ -99,6 +100,9 @@ temp/
 
 # Claude specific
 .claude/
+
+# Local binaries
+bin/
 
 # Database files
 *.db

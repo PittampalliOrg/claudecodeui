@@ -1,0 +1,21 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: claude-code-ui-config
+  namespace: default
+  labels:
+    app: claude-code-ui
+data:
+  NODE_ENV: "production"
+  PORT: "3008"
+  # Claude Code telemetry configuration
+  CLAUDE_CODE_ENABLE_TELEMETRY: "1"
+  OTEL_METRICS_EXPORTER: "otlp"
+  OTEL_LOGS_EXPORTER: "otlp"
+  OTEL_EXPORTER_OTLP_PROTOCOL: "grpc"
+  OTEL_EXPORTER_OTLP_ENDPOINT: "http://alloy.monitoring.svc.cluster.local:4317"
+  OTEL_SERVICE_NAME: "claude-code-ui"
+  OTEL_RESOURCE_ATTRIBUTES: "service.namespace=default,deployment.environment=production,app.version=1.1.3"
+  # Optional: Configure export intervals for debugging (defaults: metrics=60s, logs=5s)
+  # OTEL_METRIC_EXPORT_INTERVAL: "30000"  # 30 seconds
+  # OTEL_LOGS_EXPORT_INTERVAL: "5000"     # 5 seconds

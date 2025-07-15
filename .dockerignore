@@ -1,0 +1,66 @@
+# Node modules
+node_modules/
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+
+# Build directories
+dist/
+build/
+
+# Environment files
+.env
+.env.local
+.env.development.local
+.env.test.local
+.env.production.local
+
+# IDE files
+.vscode/
+.idea/
+*.swp
+*.swo
+*.swn
+.DS_Store
+
+# Git
+.git/
+.gitignore
+
+# Documentation
+README.md
+*.md
+
+# Testing
+coverage/
+.nyc_output/
+
+# Development files
+devbox.json
+devbox.lock
+
+# Docker files (don't include them in the build context)
+Dockerfile
+docker-compose.yml
+.dockerignore
+
+# Kubernetes files
+k8s/
+
+# GitHub
+.github/
+
+# Logs
+logs/
+*.log
+
+# Temporary files
+tmp/
+temp/
+*.tmp
+
+# Local binaries
+bin/
+
+# OS files
+Thumbs.db

@@ -1,0 +1,44 @@
+version: '3.8'
+
+services:
+  claude-code-ui:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: claude-code-ui
+    ports:
+      - "3008:3008"
+    environment:
+      - NODE_ENV=production
+      - PORT=3008
+      # Claude Code telemetry configuration for local development
+      - CLAUDE_CODE_ENABLE_TELEMETRY=1
+      - OTEL_METRICS_EXPORTER=otlp
+      - OTEL_LOGS_EXPORTER=otlp
+      - OTEL_EXPORTER_OTLP_PROTOCOL=http/protobuf
+      - OTEL_EXPORTER_OTLP_ENDPOINT=http://localhost:4318
+      - OTEL_SERVICE_NAME=claude-code-ui-dev
+      - OTEL_RESOURCE_ATTRIBUTES=service.namespace=local,deployment.environment=development
+    volumes:
+      # Mount Claude projects directory from host
+      - ~/.claude/projects:/home/claude/.claude/projects
+      # Optional: Mount custom Claude configuration if needed
+      # - ~/.claude/config.json:/home/claude/.claude/config.json:ro
+    restart: unless-stopped
+    networks:
+      - claude-network
+    healthcheck:
+      test: ["CMD", "node", "-e", "require('http').get('http://localhost:3008/api/health', (res) => process.exit(res.statusCode === 200 ? 0 : 1))"]
+      interval: 30s
+      timeout: 3s
+      retries: 3
+      start_period: 40s
+
+networks:
+  claude-network:
+    driver: bridge
+
+# Optional: Add volumes for persistent data if needed
+volumes:
+  claude-projects:
+    driver: local

@@ -1,0 +1,95 @@
+version: v2beta1
+name: claudecodeui
+
+# This is a list of `pipelines` that DevSpace can execute (you can define your own)
+pipelines:
+  # This is the pipeline for the main command: `devspace dev` (or `devspace run-pipeline dev`)
+  dev:
+    run: |-
+      run_dependencies --all       # 1. Deploy any projects this project needs (see "dependencies")
+      ensure_pull_secrets --all    # 2. Ensure pull secrets
+      create_deployments --all     # 3. Deploy Helm charts and manifests specfied as "deployments"
+      start_dev app                # 4. Start dev mode "app" (see "dev" section)
+  # You can run this pipeline via `devspace deploy` (or `devspace run-pipeline deploy`)
+  deploy:
+    run: |-
+      run_dependencies --all                            # 1. Deploy any projects this project needs (see "dependencies")
+      ensure_pull_secrets --all                         # 2. Ensure pull secrets
+      build_images --all -t $(git describe --always)    # 3. Build, tag (git commit hash) and push all images (see "images")
+      create_deployments --all                          # 4. Deploy Helm charts and manifests specfied as "deployments"
+
+# This is a list of `images` that DevSpace can build for this project
+# We recommend to skip image building during development (devspace dev) as much as possible
+images:
+  app:
+    image: vpittamp.azurecr.io/claudecodeui:v1.1.4
+    dockerfile: ./Dockerfile
+
+# This is a list of `deployments` that DevSpace can create for this project
+# deployments:
+#   app:
+    # This deployment uses `kubectl` but you can also define `helm` deployments
+    # kubectl:
+      # manifests:
+        # - ./resources/nextjs/base/**
+        # - ./resources/infra-secrets/base/**
+        # - ./resources/postgres/base/**
+        # - ./resources/redis/base/**
+
+# This is a list of `dev` containers that are based on the containers created by your deployments
+dev:
+  app:
+    # Search for the container that runs this image
+    imageSelector: vpittamp.azurecr.io/claudecodeui:v1.1.4
+    # Replace the container image with this dev-optimized image (allows to skip image building during development)
+    devImage: ghcr.io/loft-sh/devspace-containers/typescript:20-alpine
+    
+    # Sync files between the local filesystem and the development container
+    sync:
+      - path: ./
+      # - path: /home/vpittamp/.claude:/.claude
+        excludePaths:
+        - node_modules/
+
+    # Open a terminal and use the following command to start it
+    terminal:
+      command: ./devspace_start.sh
+    # Inject a lightweight SSH server into the container (so your IDE can connect to the remote dev env)
+    ssh:
+      enabled: true
+    # Make the following commands from my local machine available inside the dev container
+    proxyCommands:
+      - command: devspace
+      - command: kubectl
+      - command: helm
+      - gitCredentials: true
+    # Forward the following ports to be able access your application via localhost
+    ports:
+      - port: "3009:3009"      # <─ replaces the two-field form
+        bindAddress: 0.0.0.0   # keep this if you need it
+      - port: "9229"           # debugger, same local & remote
+    # Open the following URLs once they return an HTTP status code other than 502 or 503
+    open:
+      - url: http://claudecodeui.localtest.me
+# vars: 
+#   NEXTAUTH_URL="http://localhost:3000"
+#   NEXT_PUBLIC_BASE_URL="http://localhost:3000"
+#   NEXT_PUBLIC_ASSET_PREFIX="http://localhost:3000"
+#   NEXT_PUBLIC_SITE_URL="http://localhost:3000"
+#   NEXT_PUBLIC_BASE_PATH="http://localhost:3000"
+#   NEXT_PUBLIC_OTEL_TRACES_ENDPOINT="http://localhost:3000/api/telemetry/traces"
+#   NEXT_PUBLIC_OTEL_LOGS_ENDPOINT="http://localhost:3000/api/telemetry/logs"
+# Use the `commands` section to define repeatable dev workflows for this project 
+commands:
+  migrate-db:
+    command: |-
+      echo 'This is a cross-platform, shared command that can be used to codify any kind of dev task.'
+      echo 'Anyone using this project can invoke it via "devspace run migrate-db"'
+
+# Define dependencies to other projects with a devspace.yaml
+# dependencies:
+#   api:
+#     git: https://...  # Git-based dependencies
+#     tag: v1.0.0
+#   ui:
+#     path: ./ui        # Path-based dependencies (for monorepos)
