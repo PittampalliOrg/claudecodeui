@@ -17,8 +17,15 @@ export class Claudecodeui {
     registryUsername: string,
     registryPassword: Secret,
   ): Promise<string> {
-    // Parse comma-separated tags
-    const tagList = tags.split(',').map(tag => tag.trim()).filter(tag => tag.length > 0)
+    // Convert image name to lowercase as required by Docker registries
+    const lowerImageName = imageName.toLowerCase()
+    
+    // Parse comma-separated tags and extract just the tag portion
+    const tagList = tags.split(',').map(tag => {
+      // Extract just the tag part after the last colon
+      const parts = tag.trim().split(':')
+      return parts[parts.length - 1]
+    }).filter(tag => tag.length > 0)
     
     // Build stage: Build the Vite application
     const buildContainer = dag.container()
@@ -89,7 +96,7 @@ export class Claudecodeui {
     
     // Add labels
     productionContainer = productionContainer
-      .withLabel("org.opencontainers.image.source", `https://github.com/${imageName}`)
+      .withLabel("org.opencontainers.image.source", `https://github.com/${lowerImageName}`)
       .withLabel("org.opencontainers.image.description", "Claude Code UI - A web-based UI for Claude Code CLI")
     
     // Login to registry
@@ -102,7 +109,7 @@ export class Claudecodeui {
     // Push with all tags
     const results: string[] = []
     for (const tag of tagList) {
-      const fullTag = `${registry}/${imageName}:${tag}`
+      const fullTag = `${registry}/${lowerImageName}:${tag}`
       const pushed = await productionContainer.publish(fullTag)
       results.push(pushed)
     }
