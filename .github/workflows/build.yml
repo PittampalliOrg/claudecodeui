@@ -26,21 +26,26 @@ jobs:
           fetch-depth: 0
           token: ${{ secrets.GITHUB_TOKEN }}
 
-      # 2 ─ Build & push to GHCR ------------------------------------------------------
+      # 2 ─ Install Dagger CLI ------------------------------------------------------
+      - name: Install Dagger CLI
+        run: |
+          curl -fsSL https://dl.dagger.io/dagger/install.sh | sh
+
+      # 3 ─ Build & push to GHCR ------------------------------------------------------
       - name: Build and push image with Dagger
         env:
           DAGGER_SESSION_TIMEOUT_MS: "30000"
           DAGGER_CLOUD_TOKEN: ${{ secrets.DAGGER_CLOUD_TOKEN }}
           GHCR_TOKEN:        ${{ secrets.GITHUB_TOKEN }}
         run: |
-          cd .dagger
-          npx --yes @dagger.io/dagger@0.18.12 dagger call build-claude-ui \
-            --src-dir=$(pwd)/.. \
+          # Run the Dagger function
+          ./bin/dagger call buildClaudeUi \
+            --src-dir . \
             --tag ${{ github.sha }} \
             --ghcr-repo ${{ env.GHCR_REPO }} \
             --ghcr-token env:GHCR_TOKEN
 
-      # 3 ─ Summary -------------------------------------------------------------------
+      # 4 ─ Summary -------------------------------------------------------------------
       - name: Output summary
         run: |
           echo "### Claude Code UI image pushed" >> $GITHUB_STEP_SUMMARY
