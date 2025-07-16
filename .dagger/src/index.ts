@@ -23,6 +23,8 @@ export class Claudecodeui {
     // Build stage: Build the Vite application
     const buildContainer = dag.container()
       .from("node:20-alpine")
+      // Install Python and build dependencies for native modules
+      .withExec(["apk", "add", "--no-cache", "python3", "make", "g++", "py3-pip"])
       .withDirectory("/app", source)
       .withWorkdir("/app")
       .withExec(["npm", "ci", "--prefer-offline", "--no-audit"])
