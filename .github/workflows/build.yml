@@ -1,52 +1,62 @@
-name: Build & Push Claude Code UI
+name: Build and Push Backstage Image
 
 on:
   push:
-    branches: [main, basics, local]
+    branches:
+      - main
+      - master
   pull_request:
-    branches: [main, basics, local]
+    branches:
+      - main
+      - master
   workflow_dispatch:
 
 env:
-  IMAGE_NAME: claude-code-ui
-  GHCR_REPO: ghcr.io/${{ github.repository }}
+  REGISTRY: ghcr.io
+  IMAGE_NAME: ${{ github.repository }}
 
 jobs:
-  build:
+  build-and-push:
     runs-on: depot-ubuntu-24.04,dagger=0.18.12
     permissions:
-      contents: write
+      contents: read
       packages: write
-
+      
     steps:
-      # 1 ─ Checkout -----------------------------------------------------------------
-      - name: Checkout code
+      - name: Checkout repository
         uses: actions/checkout@v4
+        
+      - name: Extract metadata
+        id: meta
+        uses: docker/metadata-action@v5
         with:
-          fetch-depth: 0
-          token: ${{ secrets.GITHUB_TOKEN }}
-
-      # 2 ─ Install Dagger CLI ------------------------------------------------------
-      - name: Install Dagger CLI
-        run: |
-          curl -fsSL https://dl.dagger.io/dagger/install.sh | sh
-
-      # 3 ─ Build & push to GHCR ------------------------------------------------------
-      - name: Build and push image with Dagger
+          images: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}
+          tags: |
+            type=ref,event=branch
+            type=ref,event=pr
+            type=sha,prefix={{branch}}-
+            type=raw,value=latest,enable={{is_default_branch}}
+            
+      - name: Build and push with Dagger
         env:
-          DAGGER_SESSION_TIMEOUT_MS: "30000"
           DAGGER_CLOUD_TOKEN: ${{ secrets.DAGGER_CLOUD_TOKEN }}
-          GHCR_TOKEN:        ${{ secrets.GITHUB_TOKEN }}
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
-          # Run the Dagger function
-          ./bin/dagger call buildClaudeUi \
-            --src-dir . \
-            --tag ${{ github.sha }} \
-            --ghcr-repo ${{ env.GHCR_REPO }} \
-            --ghcr-token env:GHCR_TOKEN
-
-      # 4 ─ Summary -------------------------------------------------------------------
-      - name: Output summary
+          # Convert tags from metadata action to comma-separated list
+          TAGS_JSON='${{ steps.meta.outputs.json }}'
+          TAGS=$(echo "$TAGS_JSON" | jq -r '.tags | join(",")')
+          
+          # Run Dagger build and push
+          dagger -m . call build-and-push \
+            --source . \
+            --registry "${{ env.REGISTRY }}" \
+            --image-name "${{ env.IMAGE_NAME }}" \
+            --tags "$TAGS" \
+            --registry-username "${{ github.actor }}" \
+            --registry-password env:GITHUB_TOKEN
+          
+      - name: Image digest
         run: |
-          echo "### Claude Code UI image pushed" >> $GITHUB_STEP_SUMMARY
-          echo "- GHCR : ${{ env.GHCR_REPO }}:${{ github.sha }}" >> $GITHUB_STEP_SUMMARY
+          echo "Image pushed successfully"
+          echo "Tags: ${{ steps.meta.outputs.tags }}"
+          echo "Labels: ${{ steps.meta.outputs.labels }}"

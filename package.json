@@ -22,7 +22,7 @@
   "author": "Claude Code UI Contributors",
   "license": "MIT",
   "dependencies": {
-    "@anthropic-ai/claude-code": "^1.0.44",
+    "@anthropic-ai/claude-code": "^1.0.53",
     "@codemirror/lang-css": "^6.3.1",
     "@codemirror/lang-html": "^6.4.9",
     "@codemirror/lang-javascript": "^6.2.4",
@@ -36,7 +36,7 @@
     "@xterm/addon-webgl": "^0.18.0",
     "bcrypt": "^6.0.0",
     "better-sqlite3": "^12.2.0",
-    "cdk8s-cli": "^2.200.126",
+    "cdk8s-cli": "^2.200.131",
     "chokidar": "^4.0.3",
     "class-variance-authority": "^0.7.1",
     "clsx": "^2.1.1",

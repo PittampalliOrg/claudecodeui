@@ -1,73 +1,110 @@
-// .dagger/src/index.ts
-import { dag, Container, Directory, Secret, object, func } from "../sdk/index.js";
+/**
+ * Dagger module for building and pushing Claude Code UI container images
+ */
+import { dag, Directory, object, func, Secret } from "@dagger.io/dagger"
 
 @object()
-export class ClaudeCodeUI {
+export class Claudecodeui {
   /**
-   * Build the Claude Code UI image and (optionally) push to GHCR.
+   * Build the Vite application and create a container image
    */
   @func()
-  async buildClaudeUi(
-    srcDir: Directory,
-    tag = "latest",
-    ghcrRepo?: string,
-    ghcrToken?: Secret,
-  ): Promise<Container> {
-    /* ── Stage 1: build ───────────────────────────────────────────── */
-    const builder = dag
-      .container()
+  async buildAndPush(
+    source: Directory,
+    registry: string,
+    imageName: string,
+    tags: string,
+    registryUsername: string,
+    registryPassword: Secret,
+  ): Promise<string> {
+    // Parse comma-separated tags
+    const tagList = tags.split(',').map(tag => tag.trim()).filter(tag => tag.length > 0)
+    
+    // Build stage: Build the Vite application
+    const buildContainer = dag.container()
       .from("node:20-alpine")
-      .withExec(["apk", "add", "--no-cache", "bash", "g++", "make", "python3"])
+      .withDirectory("/app", source)
       .withWorkdir("/app")
-      .withDirectory("/app", srcDir)
-      .withExec(["npm", "ci"])
-      .withExec(["npm", "run", "build"]);
-
-    /* ── Stage 2: runtime ─────────────────────────────────────────── */
-    let runtime = dag
-      .container()
-      .from("node:20-alpine")
-      .withExec([
-        "apk", "add", "--no-cache",
-        "bash", "g++", "git", "make", "openssh-client", "python3", "wget",
-      ])
-      .withExec([
-        "sh", "-c",
-        "wget -q https://github.com/grafana/mcp-grafana/releases/download/v0.5.0/mcp-grafana_Linux_x86_64.tar.gz -O /tmp/mcp.tar.gz && " +
-        "tar -xzf /tmp/mcp.tar.gz -C /tmp && mv /tmp/mcp-grafana /usr/local/bin/ && chmod +x /usr/local/bin/mcp-grafana",
-      ])
-      .withExec(["addgroup", "-g", "1001", "-S", "claude"])
-      .withExec(["adduser", "-u", "1001", "-S", "claude", "-G", "claude"])
-      .withWorkdir("/app")
-      .withDirectory("/app", srcDir.withoutDirectory("node_modules").withoutDirectory("dist"))
-      .withExec(["npm", "ci", "--omit=dev"])
-      .withDirectory("/app/dist", builder.directory("/app/dist"))
-      .withExec(["mkdir", "-p", "/home/claude/.claude/projects"])
-      .withExec(["chown", "-R", "claude:claude", "/app", "/home/claude"])
-      .withUser("claude")
-      .withEnvVariable("NODE_ENV", "production")
-      .withEnvVariable("PORT", "3001")
-      .withEnvVariable("HOME", "/home/claude")
-      .withEnvVariable("PATH", "/app/node_modules/.bin:${PATH}")
-      .withEnvVariable("CLAUDE_CODE_ENABLE_TELEMETRY", "1")
-      .withEnvVariable("OTEL_METRICS_EXPORTER", "otlp")
-      .withEnvVariable("OTEL_LOGS_EXPORTER", "otlp")
-      .withEnvVariable("OTEL_EXPORTER_OTLP_PROTOCOL", "grpc")
-      .withEnvVariable("OTEL_EXPORTER_OTLP_ENDPOINT", "http://alloy.monitoring.svc.cluster.local:4317")
-      .withEnvVariable("OTEL_SERVICE_NAME", "claude-code-ui")
-      .withEnvVariable(
-        "OTEL_RESOURCE_ATTRIBUTES",
-        "service.namespace=default,deployment.environment=production,app.version=1.1.3",
-      )
-      .withExposedPort(3001)
-      .withEntrypoint(["node", "server/index.js"]);
-
-    /* ── Push only if creds provided ──────────────────────────────── */
-    if (ghcrRepo && ghcrToken) {
-      runtime = runtime.withRegistryAuth(ghcrRepo, "x-access-token", ghcrToken);
-      await runtime.publish(`${ghcrRepo}:${tag}`);
+      .withExec(["npm", "ci", "--prefer-offline", "--no-audit"])
+      .withExec(["npm", "run", "build"])
+    
+    // Get the built dist directory
+    const distDir = buildContainer.directory("/app/dist")
+    
+    // Production stage: Create a lightweight container with nginx
+    let productionContainer = dag.container()
+      .from("nginx:alpine")
+      .withDirectory("/usr/share/nginx/html", distDir)
+      .withExec(["rm", "/etc/nginx/conf.d/default.conf"])
+      .withNewFile("/etc/nginx/conf.d/default.conf", `server {
+    listen 80;
+    server_name localhost;
+    root /usr/share/nginx/html;
+    index index.html;
+    
+    # Enable gzip compression
+    gzip on;
+    gzip_vary on;
+    gzip_min_length 1024;
+    gzip_types text/plain text/css text/xml text/javascript application/javascript application/xml+rss application/json;
+    
+    # Security headers
+    add_header X-Frame-Options "SAMEORIGIN" always;
+    add_header X-Content-Type-Options "nosniff" always;
+    add_header X-XSS-Protection "1; mode=block" always;
+    
+    # Cache static assets
+    location ~* \.(js|css|png|jpg|jpeg|gif|ico|svg|woff|woff2|ttf|eot)$ {
+        expires 1y;
+        add_header Cache-Control "public, immutable";
     }
-
-    return runtime;
+    
+    # Handle client-side routing
+    location / {
+        try_files $uri $uri/ /index.html;
+    }
+    
+    # API proxy (if needed in production)
+    location /api {
+        proxy_pass http://backend:3002;
+        proxy_http_version 1.1;
+        proxy_set_header Upgrade $http_upgrade;
+        proxy_set_header Connection 'upgrade';
+        proxy_set_header Host $host;
+        proxy_cache_bypass $http_upgrade;
+    }
+    
+    # WebSocket proxy (if needed in production)
+    location /ws {
+        proxy_pass http://backend:3002;
+        proxy_http_version 1.1;
+        proxy_set_header Upgrade $http_upgrade;
+        proxy_set_header Connection "upgrade";
+        proxy_set_header Host $host;
+    }
+}`)
+      .withExposedPort(80)
+    
+    // Add labels
+    productionContainer = productionContainer
+      .withLabel("org.opencontainers.image.source", `https://github.com/${imageName}`)
+      .withLabel("org.opencontainers.image.description", "Claude Code UI - A web-based UI for Claude Code CLI")
+    
+    // Login to registry
+    productionContainer = productionContainer.withRegistryAuth(
+      registry,
+      registryUsername,
+      registryPassword
+    )
+    
+    // Push with all tags
+    const results: string[] = []
+    for (const tag of tagList) {
+      const fullTag = `${registry}/${imageName}:${tag}`
+      const pushed = await productionContainer.publish(fullTag)
+      results.push(pushed)
+    }
+    
+    return results.join('\n')
   }
 }

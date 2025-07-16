@@ -1,12 +1,3 @@
 {
-  "mcpServers": {
-    "context-7": {
-      "type": "http",
-      "url": "https://server.smithery.ai/@upstash/context7-mcp/mcp?api_key=9ddc82ae-ed44-4c16-a2da-a727a47a4120&profile=philosophical-mosquito-ehpXPz"
-    },
-    "grafana": {
-      "type": "stdio",
-      "command": "/usr/local/bin/mcp-grafana"
-    }
-  }
+  "mcpServers": {}
 }
